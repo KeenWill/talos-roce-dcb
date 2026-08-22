@@ -1,0 +1,70 @@
+name: Image
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/keenwill/roce-dcb
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Check manifest version matches tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          manifest_version="$(awk '/^  version:/ { print $2; exit }' manifest.yaml)"
+          if [ "${manifest_version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "manifest.yaml metadata.version is ${manifest_version}, tag is ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      # Tags: <tag> and latest. Manual runs: the sanitised branch name only.
+      # Pull requests: a throwaway tag, never pushed.
+      - name: Compute image tags
+        id: tags
+        run: |
+          ref_tag="$(printf '%s' "${GITHUB_REF_NAME}" | tr '/' '-')"
+          tags="${IMAGE_NAME}:${ref_tag}"
+          case "${GITHUB_REF}" in
+            refs/tags/v*) tags="${tags},${IMAGE_NAME}:latest" ;;
+          esac
+          echo "tags=${tags}" >> "${GITHUB_OUTPUT}"
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Talos extension images must be plain single-platform images, so
+      # provenance attestations (which produce an image index) are disabled.
+      - name: Build and push extension image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          provenance: false
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
