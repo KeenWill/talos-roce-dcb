@@ -1,0 +1,12 @@
+version: v1alpha1
+metadata:
+  name: roce-dcb
+  version: v0.1.0
+  author: William Goeller
+  description: |
+    Configures Mellanox mlx5_core interfaces for lossless RoCE: enables PFC on
+    the RoCE priority, installs DSCP-to-priority mappings, and re-applies them
+    periodically.
+  compatibility:
+    talos:
+      version: ">= v1.12.0"

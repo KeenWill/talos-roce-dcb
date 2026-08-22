@@ -1,0 +1,135 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+expected_mlx5_ports="${ROCE_DCB_EXPECTED_MLX5_PORTS:-1}"
+interval_seconds="${ROCE_DCB_REAPPLY_INTERVAL_SECONDS:-60}"
+retry_seconds="${ROCE_DCB_RETRY_INTERVAL_SECONDS:-15}"
+pfc_priority="${ROCE_DCB_PFC_PRIORITY:-3}"
+dscp_prio_map="${ROCE_DCB_DSCP_PRIO_MAP:-26:3 48:6}"
+dcb_bin="${ROCE_DCB_DCB_BIN:-$(command -v dcb)}"
+
+log() {
+  printf '%s\n' "$*"
+}
+
+error() {
+  log "ERROR: $*" >&2
+}
+
+driver_name_for_interface() {
+  interface_path="$1"
+
+  if [ ! -e "${interface_path}/device/driver" ]; then
+    return 1
+  fi
+
+  basename "$(readlink -f "${interface_path}/device/driver")"
+}
+
+# True when "$2" is one of the whitespace-separated words of "$1".
+has_word() {
+  for word in $1; do
+    if [ "${word}" = "$2" ]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+validate_interface_dcb() {
+  interface="$1"
+
+  ets_state="$("${dcb_bin}" ets show dev "${interface}" prio-tc)" || return 1
+  if ! has_word "${ets_state}" "${pfc_priority}:${pfc_priority}"; then
+    error "expected ${interface} to map priority ${pfc_priority} to traffic class ${pfc_priority}, got: ${ets_state}"
+    return 1
+  fi
+
+  pfc_state="$("${dcb_bin}" pfc show dev "${interface}" prio-pfc)" || return 1
+  if ! has_word "${pfc_state}" "${pfc_priority}:on"; then
+    error "expected PFC priority ${pfc_priority} to be enabled on ${interface}, got: ${pfc_state}"
+    return 1
+  fi
+
+  app_state="$("${dcb_bin}" -N app show dev "${interface}" dscp-prio)" || return 1
+  for mapping in ${dscp_prio_map}; do
+    if ! has_word "${app_state}" "${mapping}"; then
+      error "expected DSCP mapping ${mapping} on ${interface}, got: ${app_state}"
+      return 1
+    fi
+  done
+}
+
+configure_interface() {
+  interface="$1"
+  verbose="$2"
+
+  if [ "${verbose}" = 1 ]; then
+    log "Configuring RoCE DCB settings on ${interface}"
+  fi
+
+  "${dcb_bin}" pfc set dev "${interface}" prio-pfc all:off "${pfc_priority}:on" || return 1
+  # shellcheck disable=SC2086 # the map is a space-separated list of DSCP:PRIO pairs
+  "${dcb_bin}" app replace dev "${interface}" dscp-prio ${dscp_prio_map} || return 1
+
+  if "${dcb_bin}" apptrust set dev "${interface}" order dscp pcp 2>/dev/null; then
+    if [ "${verbose}" = 1 ]; then
+      log "Configured DCB app trust order on ${interface}: dscp pcp"
+    fi
+  elif [ "${verbose}" = 1 ]; then
+    log "WARNING: ${interface} does not expose DCB apptrust; continuing with explicit DCB app mappings"
+  fi
+
+  validate_interface_dcb "${interface}" || return 1
+
+  if [ "${verbose}" = 1 ]; then
+    log "Resulting DCB PFC state for ${interface}:"
+    "${dcb_bin}" pfc show dev "${interface}" pfc-cap prio-pfc delay || return 1
+    log "Resulting DCB ETS state for ${interface}:"
+    "${dcb_bin}" ets show dev "${interface}" prio-tc || return 1
+    log "Resulting DCB app state for ${interface}:"
+    "${dcb_bin}" app show dev "${interface}" dscp-prio || return 1
+  fi
+}
+
+configure_roce_dcb() {
+  verbose="$1"
+  configured=0
+  configuration_failed=0
+
+  for interface_path in /sys/class/net/*; do
+    interface="${interface_path##*/}"
+
+    driver="$(driver_name_for_interface "${interface_path}" || true)"
+    if [ "${driver}" != mlx5_core ]; then
+      continue
+    fi
+
+    configured=$((configured + 1))
+    if ! configure_interface "${interface}" "${verbose}"; then
+      configuration_failed=1
+    fi
+  done
+
+  if [ "${configured}" -ne "${expected_mlx5_ports}" ]; then
+    error "expected to configure ${expected_mlx5_ports} mlx5_core RoCE port(s), configured ${configured}"
+    configuration_failed=1
+  fi
+
+  return "${configuration_failed}"
+}
+
+# A failed first pass exits so Talos restarts the service; later failures are
+# retried in place until the configuration validates again.
+configure_roce_dcb 1 || exit 1
+
+while true; do
+  sleep "${interval_seconds}"
+
+  while ! configure_roce_dcb 0; do
+    sleep "${retry_seconds}"
+  done
+done

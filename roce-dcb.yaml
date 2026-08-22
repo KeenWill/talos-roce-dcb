@@ -1,0 +1,19 @@
+name: roce-dcb
+container:
+  entrypoint: ./bin/sh
+  args:
+    - -ceu
+    - /usr/local/sbin/configure-roce-dcb
+  environment:
+    - PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    - ROCE_DCB_EXPECTED_MLX5_PORTS=1
+    - ROCE_DCB_REAPPLY_INTERVAL_SECONDS=60
+  security:
+    maskedPaths: []
+    readonlyPaths: []
+    writeableSysfs: true
+depends:
+  - network:
+      - addresses
+restart: always
+logToConsole: false
