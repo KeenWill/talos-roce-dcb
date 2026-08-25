@@ -178,6 +178,13 @@ checks this).
 | `build.sh`                    | Local build/push helper.                                  |
 | `.github/workflows/image.yml` | Builds on PRs; builds and pushes on `v*` tags.            |
 
+## AI authorship
+
+This codebase is written by AI agents working under human direction and review. 
+This system extension is used in production in a self-hosted cluster, but evaluate
+it as you would any young project and treat production use as your own risk 
+assessment.
+
 ## License
 
 [MIT](LICENSE)
